@@ -6,7 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # Page Config Streamlit
-st.set_page_config(page_title="Crypto Alpha Hunter", layout="wide", page_icon="🦈")
+st.set_page_config(page_title="Crypto Alpha Hunter", layout="wide")
 
 # STYLING
 st.markdown("""
@@ -26,12 +26,19 @@ lookback = st.sidebar.slider("Lookback Period (Days)", 30, 365, 90)
 window = st.sidebar.slider("Rolling Correlation Window", 7, 60, 30)
 
 st.title("Crypto Decoupling Detector")
-st.markdown("### Finding 'Uncorrelated Alpha' in a uncertain public sentiment")
+st.markdown("### Finding 'Uncorrelated Alpha' in uncertain public sentiment")
 
 # DATA ENGINE
 @st.cache_data
-def get_data(tickers, period="2y"):
-    data = yf.download(tickers, period=period)['Close']
+def get_data(ticker_list, period="2y"):
+    # Fix for yfinance formatting issues
+    if isinstance(ticker_list, str):
+        ticker_list = [ticker_list]
+    data = yf.download(ticker_list, period=period)
+    
+    # Handle different return shapes from yfinance
+    if 'Close' in data.columns:
+        return data['Close']
     return data
 
 if len(tickers) < 2:
@@ -40,41 +47,62 @@ else:
     try:
         with st.spinner('Fetching live market data...'):
             # Download Data
-            df = get_data(tickers)
+            df = get_data(tickers, period=f"{lookback + 100}d")
             
+            # Check for empty data to prevent crashes
+            if df.empty:
+                st.error("No data found. Please check your ticker symbols.")
+                st.stop()
+            
+            # Clean data: drop columns that failed to download
+            df = df.dropna(axis=1, how='all')
+
             # Calculate Returns
             returns = df.pct_change().dropna()
             
-            # Cumulative Returns (for the first chart)
-            cum_returns = (1 + returns).cumprod()
+            # Safety check for window size
+            if len(returns) < window:
+                st.error(f"Not enough data points ({len(returns)}) for the selected window ({window}). Increase the lookback period.")
+                st.stop()
 
-        # KPI 
+        # KPI Display
         # We assume the first ticker selected is the "Benchmark" (usually BTC)
         benchmark = tickers[0]
+        
+        # Verify benchmark exists in data
+        if benchmark not in returns.columns:
+            st.error(f"Benchmark {benchmark} data is missing.")
+            st.stop()
+            
         st.write(f"**Benchmark Analysis:** Correlation vs {benchmark} (Last {window} Days)")
         
-        cols = st.columns(len(tickers)-1)
-        for i, tick in enumerate(tickers[1:]):
-            # Calculate rolling correlation
-            rolling_corr = returns[benchmark].rolling(window=window).corr(returns[tick])
-            current_corr = rolling_corr.iloc[-1]
-            
-            # Color logic: Low correlation is GOOD (Green), High is BAD (Red)
-            delta_color = "normal" 
-            if current_corr > 0.8: 
-                state = "Lockstep"
-            elif current_corr < 0.5:
-                state = "Decoupled (Alpha?)"
-            else:
-                state = "Linked"
+        # filter out the benchmark from the comparison list
+        comparison_assets = [t for t in tickers if t != benchmark and t in returns.columns]
+        
+        if comparison_assets:
+            cols = st.columns(len(comparison_assets))
+            for i, tick in enumerate(comparison_assets):
+                # Calculate rolling correlation
+                rolling_corr = returns[benchmark].rolling(window=window).corr(returns[tick])
                 
-            with cols[i % len(cols)]:
-                st.metric(
-                    label=f"{tick}", 
-                    value=f"{current_corr:.2f}", 
-                    delta=state,
-                    delta_color="off" # Handle color via logic if needed, but standard is fine
-                )
+                if not rolling_corr.empty and not pd.isna(rolling_corr.iloc[-1]):
+                    current_corr = rolling_corr.iloc[-1]
+                    
+                    # Logic: Low correlation is GOOD, High is BAD
+                    if current_corr > 0.8: 
+                        state = "Lockstep"
+                    elif current_corr < 0.5:
+                        state = "Decoupled (Alpha?)"
+                    else:
+                        state = "Linked"
+                    
+                    with cols[i]:
+                        st.metric(
+                            label=f"{tick}", 
+                            value=f"{current_corr:.2f}", 
+                            delta=state,
+                            delta_color="off"
+                        )
 
         # --- TABBED ANALYSIS ---
         tab1, tab2, tab3 = st.tabs(["Performance", "Rolling Correlation", "Heatmap Matrix"])
@@ -84,8 +112,7 @@ else:
             # Normalize to start at 100 for fair comparison
             normalized_df = df / df.iloc[0] * 100
             
-            fig_perf = px.line(normalized_df, x=normalized_df.index, y=normalized_df.columns, 
-                               title="Asset Growth (Base 100)", template="plotly_dark")
+            fig_perf = px.line(normalized_df, title="Asset Growth (Base 100)", template="plotly_dark")
             fig_perf.update_yaxes(title="Growth ($100 invested)")
             st.plotly_chart(fig_perf, use_container_width=True)
 
@@ -94,18 +121,18 @@ else:
             st.caption(f"How much do these assets mimic {benchmark}? Lower is better for diversification.")
             
             corr_df = pd.DataFrame()
-            for tick in tickers:
-                if tick != benchmark:
-                    corr_df[tick] = returns[benchmark].rolling(window=window).corr(returns[tick])
+            for tick in comparison_assets:
+                corr_df[tick] = returns[benchmark].rolling(window=window).corr(returns[tick])
             
-            fig_roll = px.line(corr_df, title=f"{window}-Day Rolling Correlation to {benchmark}", template="plotly_dark")
-            
-            # "Danger Zone" shading for high correlation
-            fig_roll.add_hrect(y0=0.8, y1=1.0, line_width=0, fillcolor="red", opacity=0.1, annotation_text="Danger Zone (Contagion)")
-            fig_roll.add_hrect(y0=-1.0, y1=0.3, line_width=0, fillcolor="green", opacity=0.1, annotation_text="Alpha Zone (Decoupled)")
-            
-            fig_roll.update_yaxes(range=[-1, 1])
-            st.plotly_chart(fig_roll, use_container_width=True)
+            if not corr_df.empty:
+                fig_roll = px.line(corr_df, title=f"{window}-Day Rolling Correlation to {benchmark}", template="plotly_dark")
+                
+                # Shading for high correlation
+                fig_roll.add_hrect(y0=0.8, y1=1.0, line_width=0, fillcolor="red", opacity=0.1, annotation_text="Danger Zone")
+                fig_roll.add_hrect(y0=-1.0, y1=0.3, line_width=0, fillcolor="green", opacity=0.1, annotation_text="Alpha Zone")
+                
+                fig_roll.update_yaxes(range=[-1, 1])
+                st.plotly_chart(fig_roll, use_container_width=True)
 
         with tab3:
             st.subheader("Current Market Correlation Matrix")
