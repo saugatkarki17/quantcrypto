@@ -75,5 +75,18 @@ This methodology measures how closely an asset’s returns (like SOL or ETH) mov
 **1. Clone the repository**
 ```bash
 git clone [https://github.com/saugatkarki17/quantcrypto.git]
+```
+
+**2. Open the repository**
+```bash
 cd quantcrypto
+```
+**3. Install the requirements**
+```bash
 pip install -r requirements.txt
+```
+**4. On the terminal**
+```bash
+streamlit run app.py
+```
+
